@@ -1,4 +1,4 @@
-(defproject validaze "1.0.0"
+(defproject validaze "0.9.1"
   :description "Hiccup-inspired DSL implementation for the validation of JSON data."
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
