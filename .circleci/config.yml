@@ -39,5 +39,6 @@ jobs:
           key: v1-dependencies-{{ checksum "project.clj" }}
         
       # run tests!
-      - run: lein eftest
-          timeout: 1200
+      - run:
+          command: lein eftest
+          no_output_timeout: "30m"
