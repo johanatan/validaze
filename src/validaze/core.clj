@@ -645,45 +645,69 @@
                      #(apply merge (map property-lists (%1 :includes))) m))
 
 (s/fdef validator
-        :args (s/cat :events-schema ::events-schema
-                     :properties-schema ::properties-schema
-                     :super-properties-schema ::super-properties-schema
-                     :property-lists ::property-lists
-                     :refinements ::refinements)
+        :args (s/alt
+               :binary
+               (s/cat :events-schema ::events-schema
+                      :properties-schema ::properties-schema)
+               :tertiary
+               (s/cat :events-schema ::events-schema
+                      :properties-schema ::properties-schema
+                      :super-properties-schema ::super-properties-schema)
+               :quaternary
+               (s/cat :events-schema ::events-schema
+                      :properties-schema ::properties-schema
+                      :super-properties-schema ::super-properties-schema
+                      :refinements ::refinements)
+               :pentary
+               (s/cat :events-schema ::events-schema
+                      :properties-schema ::properties-schema
+                      :super-properties-schema ::super-properties-schema
+                      :property-lists ::property-lists
+                      :refinements ::refinements))
         :ret ::validator)
-(defn validator [events-schema properties-schema super-properties-schema property-lists refinements]
-  (let [property-lists (into-recursively-sorted-map property-lists)
-        events-schema-raw (into-recursively-sorted-map events-schema)
-        events-schema-reified (specter/transform
-                               [specter/MAP-VALS specter/MAP-VALS]
-                               reify-required-specs
-                               (explode-includes property-lists events-schema-raw))
-        events-schema (specter/transform
-                       [specter/MAP-VALS specter/MAP-VALS specter/MAP-VALS :required?]
-                       first
-                       events-schema-reified)
-        properties-schema (into-recursively-sorted-map properties-schema)
-        super-properties-schema-raw (into-recursively-sorted-map super-properties-schema)
-        super-properties-schema-reified (-> super-properties-schema-raw reify-required-specs)
-        super-properties-schema (specter/transform
-                                 [specter/MAP-VALS :required?]
-                                 first
-                                 super-properties-schema-reified)
-        refinements-raw (into-recursively-sorted-map refinements)
-        user-defined-refinements (specter/transform
-                                  [specter/MAP-VALS set?]
-                                  #(do [:string [%1 (fn [_] (str "must be one of: " %1))]])
-                                  refinements-raw)
-        refinements (s/assert ::refinements
-                              (merge user-defined-refinements
-                                     refinements/user-defined-refinements
-                                     normalized-base-refinements))
-        keys-validators (events-schema->keys-validators refinements events-schema super-properties-schema)
-        properties-validators (properties-schemas->validators user-defined-refinements
-                                                              refinements properties-schema super-properties-schema)
-
-        ])
-
-  )
+(defn validator
+  ([events-schema properties-schema]
+   (validator events-schema properties-schema {}))
+  ([events-schema properties-schema super-properties-schema]
+   (validator events-schema properties-schema super-properties-schema {}))
+  ([events-schema properties-schema super-properties-schema refinements]
+   (validator events-schema properties-schema super-properties-schema {} refinements))
+  ([events-schema properties-schema super-properties-schema property-lists refinements]
+   (let [property-lists (into-recursively-sorted-map property-lists)
+         events-schema-raw (into-recursively-sorted-map events-schema)
+         events-schema-reified (specter/transform
+                                [specter/MAP-VALS specter/MAP-VALS]
+                                reify-required-specs
+                                (explode-includes property-lists events-schema-raw))
+         events-schema (specter/transform
+                        [specter/MAP-VALS specter/MAP-VALS specter/MAP-VALS :required?]
+                        first
+                        events-schema-reified)
+         properties-schema (into-recursively-sorted-map properties-schema)
+         super-properties-schema-raw (into-recursively-sorted-map super-properties-schema)
+         super-properties-schema-reified (-> super-properties-schema-raw reify-required-specs)
+         super-properties-schema (specter/transform
+                                  [specter/MAP-VALS :required?]
+                                  first
+                                  super-properties-schema-reified)
+         refinements-raw (into-recursively-sorted-map refinements)
+         user-defined-refinements (specter/transform
+                                   [specter/MAP-VALS set?]
+                                   #(do [:string [%1 (fn [_] (str "must be one of: " %1))]])
+                                   refinements-raw)
+         refinements (s/assert ::refinements
+                               (merge user-defined-refinements
+                                      refinements/user-defined-refinements
+                                      normalized-base-refinements))
+         keys-validators (events-schema->keys-validators refinements events-schema super-properties-schema)
+         properties-validators (properties-schemas->validators user-defined-refinements
+                                                               refinements properties-schema super-properties-schema)]
+     (if (schemas-valid? events-schema events-schema-raw properties-schema super-properties-schema
+                         super-properties-schema-raw property-lists)
+       (fn [event]
+         (if-let [msg (validate-base (base-event-validators refinements) event)]
+           msg
+           (validate-extended keys-validators events-schema-reified
+                              (event "event_type") (event "event_version") (event "properties"))))))))
 
 (stest/instrument `validator)
