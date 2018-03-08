@@ -14,26 +14,8 @@
   :exact-lein-version "2.8.1"
   :main ^:skip-aot validaze.core
   :target-path "target/%s"
-; :uberjar-name "lambda.jar"
   ;; print warning if test takes longer than 5 seconds to run
   :eftest {:test-warn-time 5000}
-; :plugins [[s3-wagon-private "1.3.1"]]
   :profiles {:uberjar {:aot :all}
              :dev     {:global-vars  {*warn-on-reflection* false}
-                       :plugins [[lein-eftest "0.4.1"]]
-;                      :jvm-opts ["-Xmx2g"]
-                       }}
-;  :repositories [["yummly-s3" {:url           "s3p://yummly-repo/releases/"
-;                               :no-auth       true
-;                               :sign-releases false
-;                               :snapshots     {:update :always}}]]
-; :mirrors {"central"  {:name      "Nexus"
-;                       :url       "https://nexus.yummly.com/content/groups/public"
-;                       :snapshots true
-;                       :update    :daily}
-;           #"clojars" {:name         "Nexus"
-;                       :url          "https://nexus.yummly.com/content/groups/public"
-;                       :repo-manager true
-;                       :snapshots    true
-;                       :update       :daily}}
-  )
+                       :plugins [[lein-eftest "0.4.1"]]}})
