@@ -686,4 +686,4 @@
 
   )
 
-(stest/instrument)
+(stest/instrument `validator)
