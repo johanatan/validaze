@@ -513,11 +513,6 @@
 (defn- all-properties [properties-schema]
   (apply merge properties-schema))
 
-(defn- refinement->base-refinement [refinements refinement]
-  (loop [cur refinement]
-    (let [[nxt _] (refinements cur)]
-      (if (nil? nxt) cur (recur nxt)))))
-
 (def ^:private trivial-validator (fn [_] nil))
 
 (defn- properties-schemas->validators [user-defined-refinements refinements properties-schema

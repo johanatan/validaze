@@ -1,4 +1,4 @@
-(defproject yummly/validaze "0.9.3"
+(defproject yummly/validaze "0.9.4"
   :description
   "Hiccup-inspired DSL implementation of refinement types for validating JSON data."
   :license {:name "Eclipse Public License"
