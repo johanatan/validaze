@@ -10,6 +10,9 @@
    [arrangement.core :as order]
    [validaze.refinements :as refinements]))
 
+(s/def ::nonempty-string
+  (s/and string? seq))
+
 (s/def ::nonnilable-json-primitive
   (s/or :b boolean? :n number? :s string?))
 
@@ -28,13 +31,13 @@
     #(gen/recursive-gen (fn [inner] (gen/map gen/string inner))
                         (s/gen ::json-primitive))))
 
-(defn printable-fn [f to-string]
+(defn- printable-fn [f to-string]
   (reify clojure.lang.IFn
     (toString [this] (to-string))
     (invoke [this a] (f a))
     (applyTo [this a] (apply f a))))
 
-(defn printable-const-fn [constant]
+(defn- printable-const-fn [constant]
   (printable-fn
    (fn [_] constant)
    #(format "(fn [_] %s)" (if (string? constant) (format "\"%s\"" constant) constant))))
@@ -62,7 +65,7 @@
         :args (s/cat :validation-fn ::validation-fn :message-fn ::message-fn
                      :value ::json-map)
         :ret ::validation-result)
-(defn validate-to-msg [validation-fn message-fn value]
+(defn- validate-to-msg [validation-fn message-fn value]
   (if-not (s/valid? validation-fn value)
     (message-fn value)))
 
@@ -94,7 +97,7 @@
    :integer integer?
    :boolean boolean?})
 
-(def vowels #{\a \e \i \o \u})
+(def ^:private vowels #{\a \e \i \o \u})
 (def ^:private normalized-base-refinements
   (let [article #(if (vowels (first %1)) "an" "a")]
     (specter/transform
@@ -140,7 +143,12 @@
     ::refinements
     #(gen/fmap (partial merge (select-keys normalized-base-refinements [:string])) (s/gen ::refinements))))
 
-(defn gen-derived-from-refinements [f]
+(s/def ::refinements-with-string-and-object
+  (s/with-gen
+    ::refinements
+    #(gen/fmap (partial merge (select-keys normalized-base-refinements [:object])) (s/gen ::refinements-with-string))))
+
+(defn- gen-derived-from-refinements [f]
   (gen/bind
    (s/gen ::refinements-with-string)
    (fn [refinements] (gen/let [kwd (gen/elements (keys refinements))] (f refinements kwd)))))
@@ -183,7 +191,7 @@
   [col]
   (into (sorted-map) (map-indexed (comp #(specter/transform [specter/FIRST] inc %) vector) col)))
 
-(defn deep-merge
+(defn- deep-merge
   "Recursively merges maps. If keys are not maps, the last value wins."
   [& vals]
   (if (every? map? vals)
@@ -203,7 +211,7 @@
 (def property-spec
   (gen/fmap #(into {} [%]) (gen/tuple (s/gen ::snake-cased-alpha-numeric) (s/gen ::property-attrs))))
 
-(defn valid-includes? [property-set]
+(defn- valid-includes? [property-set]
   (if (contains? property-set :includes)
     (s/valid? (s/coll-of keyword? :kind vector?)
               (property-set :includes))
@@ -299,7 +307,7 @@
 (defn- all-referenced-properties [events-schema]
   (keys (apply merge (mapcat vals (vals events-schema)))))
 
-(defn check-property-references [events-schema properties-schema]
+(defn- check-property-references [events-schema properties-schema]
   (let [referenced (set (all-referenced-properties events-schema))
         defined (set (mapcat keys properties-schema))
         undefined (into (sorted-set) (clojure.set/difference referenced defined))
@@ -316,7 +324,7 @@
       true))) ; true if validation succeeded
 
 (s/fdef keys-validator
-        :args (s/cat :refinements ::refinements-with-string
+        :args (s/cat :refinements ::refinements-with-string-and-object
                      :required-keys (s/coll-of string?)
                      :optional-keys (s/coll-of string?))
         :ret ::validator)
@@ -336,16 +344,16 @@
                        (clojure.string/trim))))]
     (refinement-kwd->validator (assoc refinements :keys [:object [validation-fn msg-fn]]) :keys)))
 
-(defn- event-desc->keys-validator [field-descs]
+(defn- event-desc->keys-validator [refinements field-descs]
   (let [{required true optional false} (group-by #(-> % second :required?) field-descs)
         [required optional] [(map first required) (map first optional)]]
-    (keys-validator required optional)))
+    (keys-validator refinements required optional)))
 
-(defn- events-schema->keys-validators [events-schema super-properties-schema]
+(defn- events-schema->keys-validators [refinements events-schema super-properties-schema]
   (let [materialized (materialize-event-schema events-schema)]
     (specter/transform
      [specter/MAP-VALS specter/MAP-VALS]
-     #(event-desc->keys-validator (merge %1 super-properties-schema))
+     #(event-desc->keys-validator refinements (merge %1 super-properties-schema))
      materialized)))
 
 (s/fdef enum-validator
@@ -387,12 +395,13 @@
     :else "[internal error]"))
 
 (declare vectorized-refinement->validator)
-(defn- object-validator [refinements key-type value-type]
+(defn- object-validator [user-defined-refinements refinements key-type value-type]
   (let [kwd->validator (partial refinement-kwd->validator refinements)
         key-validator (kwd->validator key-type)
         value-type->validator (cond (keyword? value-type) kwd->validator
                                     (and (vector? value-type) (= :list (first value-type)))
-                                    #(apply (partial vectorized-refinement->validator refinements) %1)
+                                    #(apply (partial vectorized-refinement->validator
+                                                     user-defined-refinements refinements) %1)
                                     :else (throw
                                            (IllegalStateException. (format "Invalid nested type: %s" value-type))))
         value-validator (value-type->validator value-type)
@@ -407,7 +416,7 @@
   (condp = head
     :enum (enum-validator refinements rest)
     :object (if (= 2 (count rest))
-              (object-validator refinements (first rest) (second rest))
+              (object-validator user-defined-refinements refinements (first rest) (second rest))
               (throw (IllegalStateException.
                       (format "Object vectorized refinement type expects exactly two arguments. Received: %s"
                               rest))))
@@ -476,19 +485,20 @@
        [refinements [property refinement]])))
 
 (s/fdef -prop-spec->prop-validator
-        :args (s/cat :tup ::refinements-property-refinement-tup)
+        :args (s/cat :udr ::refinements :tup ::refinements-property-refinement-tup)
         :ret (s/tuple ::snake-cased-alpha-numeric ::validator))
-(defn- -prop-spec->prop-validator [[refinements [property refinement]]]
+(defn- -prop-spec->prop-validator [user-defined-refinements [refinements [property refinement]]]
   [property
    (prepend-prop property
                  (cond
                    (keyword? refinement)
                    (refinement-kwd->validator refinements refinement)
                    (coll? refinement)
-                   (apply (partial vectorized-refinement->validator refinements) refinement)))])
+                   (apply (partial vectorized-refinement->validator
+                                   user-defined-refinements refinements) refinement)))])
 
-(defn- prop-spec->prop-validator [refinements [property refinement]]
-  (-prop-spec->prop-validator [refinements [property refinement]]))
+(defn- prop-spec->prop-validator [user-defined-refinements refinements [property refinement]]
+  (-prop-spec->prop-validator user-defined-refinements [refinements [property refinement]]))
 
 (defn- all-properties [properties-schema]
   (apply merge properties-schema))
@@ -500,8 +510,8 @@
 
 (def ^:private trivial-validator (fn [_] nil))
 
-(defn- properties-schemas->validators [refinements properties-schema super-properties-schema]
-  (let [validator-gen (partial prop-spec->prop-validator refinements)
+(defn- properties-schemas->validators [user-defined-refinements refinements properties-schema super-properties-schema]
+  (let [validator-gen (partial prop-spec->prop-validator user-defined-refinements refinements)
         transform-all #(specter/transform [specter/ALL] %1 %2) ; can't use partial because macro
         transform-last #(specter/transform [specter/LAST] %1 %2)]
     (merge
@@ -598,9 +608,9 @@
               (format "Undefined property list references: %s" (into [] undefined))))
       true)))
 
-(defn schemas-valid? [events-schema events-schema-raw properties-schema
-                      super-properties-schema super-properties-schema-raw
-                      property-lists]
+(defn- schemas-valid? [events-schema events-schema-raw properties-schema
+                       super-properties-schema super-properties-schema-raw
+                       property-lists]
   (and
    (check-property-references events-schema properties-schema)
    (check-super-property-separateness properties-schema super-properties-schema)
@@ -609,7 +619,7 @@
    (check-spec ::properties-schema properties-schema)
    (check-spec ::super-properties-schema super-properties-schema-raw)))
 
-(defn reify-required-specs [prop-schema]
+(defn- reify-required-specs [prop-schema]
   (specter/transform
    [specter/ALL (specter/collect-one specter/FIRST) specter/LAST :required?]
    (fn [prop req-spec]
@@ -623,7 +633,7 @@
             :else [req-spec trivial-validator]))
    prop-schema))
 
-(defn explode-includes [property-lists m]
+(defn- explode-includes [property-lists m]
   (specter/transform [specter/MAP-VALS specter/MAP-VALS (specter/submap [:includes])]
                      #(apply merge (map property-lists (%1 :includes))) m))
 
@@ -654,8 +664,9 @@
                               (merge user-defined-refinements
                                      refinements/user-defined-refinements
                                      normalized-base-refinements))
-        keys-validators (events-schema->keys-validators events-schema super-properties-schema)
-        properties-validators (properties-schemas->validators refinements properties-schema super-properties-schema)
+        keys-validators (events-schema->keys-validators refinements events-schema super-properties-schema)
+        properties-validators (properties-schemas->validators user-defined-refinements
+                                                              refinements properties-schema super-properties-schema)
 
         ])
 
