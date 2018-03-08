@@ -1,5 +1,6 @@
-(defproject validaze "0.9.1"
-  :description "Hiccup-inspired DSL implementation for the validation of JSON data."
+(defproject yummly/validaze "0.9.2"
+  :description
+  "Hiccup-inspired DSL implementation of refinement types for validating JSON data."
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.9.0"]

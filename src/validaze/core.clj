@@ -713,12 +713,19 @@
                                 super-properties-schema-reified)]
      (if (schemas-valid? events-schema events-schema-raw properties-schema super-properties-schema
                          super-properties-schema-raw property-lists)
-       (fn [event]
-         (if-let [msg (validate-base (base-event-validators refinements) event)]
-           msg
-           (when-let [msg
-                      (validate-extended keys-validators properties-validators events-schema-reified
-                                         (event "event_type") (event "event_version") (event "properties"))]
-             msg)))))))
+       (with-meta
+         (fn [event]
+           (if-let [msg (validate-base (base-event-validators refinements) event)]
+             msg
+             (when-let [msg
+                        (validate-extended keys-validators properties-validators events-schema-reified
+                                           (event "event_type") (event "event_version") (event "properties"))]
+               msg)))
+         {:events-schema events-schema
+          :events-schema-reified events-schema-reified
+          :super-properties-schema super-properties-schema
+          :super-properties-schema-reified super-properties-schema-reified
+          :user-defined-refinements user-defined-refinements
+          :refinements refinements})))))
 
 (stest/instrument `validator)
