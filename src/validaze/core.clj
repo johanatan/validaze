@@ -119,9 +119,12 @@
   [f val-seq]
   (seq->gen (map f val-seq)))
 
+(s/def ::refinement-tup
+  (s/tuple (s/nilable keyword?) (s/tuple ::validation-fn ::message-fn)))
+
 (s/def ::refinements
   (s/with-gen
-    (s/map-of keyword? (s/tuple (s/nilable keyword?) (s/tuple ::validation-fn ::message-fn)))
+    (s/map-of keyword? ::refinement-tup)
     #(gen/let [kwds (gen/fmap (fn [c] (if (even? (count c)) (vec (butlast c)) c))
                               (gen/vector-distinct gen/keyword {:min-elements 5 :max-elements 25}))
                cyclic-kwds (gen/return (cycle kwds))
@@ -138,6 +141,9 @@
                     [kwd [prev-k (with-meta [validation-fn message-fn] {:validates? validates? :msg msg})]]))
                 broken-cycle)]
        (into {} refinements))))
+
+(s/def ::user-defined-refinements
+  (s/map-of keyword? (s/or :set set? :refinement-tup ::refinement-tup)))
 
 (s/def ::refinements-with-string
   (s/with-gen
@@ -514,7 +520,8 @@
 
 (def ^:private trivial-validator (fn [_] nil))
 
-(defn- properties-schemas->validators [user-defined-refinements refinements properties-schema super-properties-schema]
+(defn- properties-schemas->validators [user-defined-refinements refinements properties-schema
+                                       super-properties-schema-reified]
   (let [validator-gen (partial prop-spec->prop-validator user-defined-refinements refinements)
         transform-all #(specter/transform [specter/ALL] %1 %2) ; can't use partial because macro
         transform-last #(specter/transform [specter/LAST] %1 %2)]
@@ -529,7 +536,7 @@
                (when (or always-required? (not= required-validator trivial-validator) (contains? o (first tup)))
                  (some force [(delay (required-validator o)) (delay (validator o))])))))
          (validator-gen (transform-last :type tup))))
-      super-properties-schema))))
+      super-properties-schema-reified))))
 
 (defn- validate-property-values [properties-validators props]
   (let [validators (map #(properties-validators (first %1)) props)]
@@ -545,7 +552,8 @@
                     prop-specs)]
     (map #(%1 properties) validators)))
 
-(defn- validate-extended [keys-validators events-schema-reified event-type event-version properties]
+(defn- validate-extended [keys-validators properties-validators
+                          events-schema-reified event-type event-version properties]
   (let [event-keys-validators (keys-validators event-type)
         keys-validator (get event-keys-validators event-version)]
     (if (and event-keys-validators keys-validator)
@@ -554,7 +562,7 @@
         (not-empty
          (remove nil? (concat (validate-conditional-requires
                                events-schema-reified event-type event-version properties)
-                              (validate-property-values properties)))))
+                              (validate-property-values properties-validators properties)))))
       [(format "There is no version %s for event '%s'" event-version event-type)])))
 
 (defn- property->validator [refinements prop refinement-kwd]
@@ -577,7 +585,7 @@
 
 (defn- validate-base [base-event-validators event]
   (let [validator (fn [event] (filter identity (map #(% event) base-event-validators)))]
-    (validate-vector-or-single event #(validator %) identity)))
+    (validate-vector-or-single event #(validator %) (constantly nil))))
 
 (defn- check-super-property-separateness [properties-schema super-properties-schema]
   (let [prop-keys (-> properties-schema all-properties keys set)
@@ -603,7 +611,7 @@
   (s/map-of ::snake-cased-alpha-numeric ::super-property-field))
 
 (s/def ::property-lists
-  (s/map-of keyword? ::property-lists))
+  (s/map-of keyword? ::property-set))
 
 (defn- check-property-list-references [events-schema property-lists]
   (let [keys (set (keys property-lists))
@@ -657,13 +665,13 @@
                (s/cat :events-schema ::events-schema
                       :properties-schema ::properties-schema
                       :super-properties-schema ::super-properties-schema
-                      :refinements ::refinements)
+                      :refinements ::user-defined-refinements)
                :pentary
                (s/cat :events-schema ::events-schema
                       :properties-schema ::properties-schema
                       :super-properties-schema ::super-properties-schema
                       :property-lists ::property-lists
-                      :refinements ::refinements))
+                      :refinements ::user-defined-refinements))
         :ret ::validator)
 (defn validator
   ([events-schema properties-schema]
@@ -700,14 +708,17 @@
                                       refinements/user-defined-refinements
                                       normalized-base-refinements))
          keys-validators (events-schema->keys-validators refinements events-schema super-properties-schema)
-         properties-validators (properties-schemas->validators user-defined-refinements
-                                                               refinements properties-schema super-properties-schema)]
+         properties-validators (properties-schemas->validators
+                                user-defined-refinements refinements properties-schema
+                                super-properties-schema-reified)]
      (if (schemas-valid? events-schema events-schema-raw properties-schema super-properties-schema
                          super-properties-schema-raw property-lists)
        (fn [event]
          (if-let [msg (validate-base (base-event-validators refinements) event)]
            msg
-           (validate-extended keys-validators events-schema-reified
-                              (event "event_type") (event "event_version") (event "properties"))))))))
+           (when-let [msg
+                      (validate-extended keys-validators properties-validators events-schema-reified
+                                         (event "event_type") (event "event_version") (event "properties"))]
+             msg)))))))
 
 (stest/instrument `validator)
