@@ -552,27 +552,19 @@
                     prop-specs)]
     (map #(%1 properties) validators)))
 
-(defn- validate-extended [keys-validators properties-validators
-                          events-schema-reified event-type event-version properties]
-  (let [event-keys-validators (keys-validators event-type)
-        keys-validator (get event-keys-validators event-version)]
+(defn- validate-single-extended [keys-validators properties-validators
+                                 events-schema-reified
+                                 {:strs [event_type event_version properties]}]
+  (let [event-keys-validators (keys-validators event_type)
+        keys-validator (get event-keys-validators event_version)]
     (if (and event-keys-validators keys-validator)
       (if-let [msg (keys-validator properties)]
         [msg]
         (not-empty
          (remove nil? (concat (validate-conditional-requires
-                               events-schema-reified event-type event-version properties)
+                               events-schema-reified event_type event_version properties)
                               (validate-property-values properties-validators properties)))))
-      [(format "There is no version %s for event '%s'" event-version event-type)])))
-
-(defn- property->validator [refinements prop refinement-kwd]
-  (prepend-prop prop (refinement-kwd->validator refinements refinement-kwd)))
-
-(defn- base-event-validators [refinements]
-  [(keys-validator refinements ["event_version" "event_type" "properties"] [])
-   (property->validator refinements "event_version" :integer)
-   (property->validator refinements "event_type" :string)
-   (property->validator refinements "properties" :object)])
+      [(format "There is no version %s for event '%s'" event_version event_type)])))
 
 (defn- validate-vector-or-single [vec-or-single validator-fn success-fn]
   (let [errors
@@ -583,9 +575,25 @@
       (success-fn vec-or-single)
       errors)))
 
+(defn- validate-extended [keys-validators properties-validators
+                          events-schema-reified event]
+  (validate-vector-or-single
+   event
+   (partial validate-single-extended keys-validators properties-validators events-schema-reified)
+   (constantly nil)))
+
+(defn- property->validator [refinements prop refinement-kwd]
+  (prepend-prop prop (refinement-kwd->validator refinements refinement-kwd)))
+
+(defn- base-event-validators [refinements]
+  [(keys-validator refinements ["event_version" "event_type" "properties"] [])
+   (property->validator refinements "event_version" :integer)
+   (property->validator refinements "event_type" :string)
+   (property->validator refinements "properties" :object)])
+
 (defn- validate-base [base-event-validators event]
   (let [validator (fn [event] (filter identity (map #(% event) base-event-validators)))]
-    (validate-vector-or-single event #(validator %) (constantly nil))))
+    (validate-vector-or-single event validator (constantly nil))))
 
 (defn- check-super-property-separateness [properties-schema super-properties-schema]
   (let [prop-keys (-> properties-schema all-properties keys set)
@@ -714,12 +722,11 @@
      (if (schemas-valid? events-schema events-schema-raw properties-schema super-properties-schema
                          super-properties-schema-raw property-lists)
        (with-meta
-         (fn [event]
-           (if-let [msg (validate-base (base-event-validators refinements) event)]
+         (fn [event-or-events]
+           (if-let [msg (validate-base (base-event-validators refinements) event-or-events)]
              msg
-             (when-let [msg
-                        (validate-extended keys-validators properties-validators events-schema-reified
-                                           (event "event_type") (event "event_version") (event "properties"))]
+             (when-let [msg (validate-extended
+                             keys-validators properties-validators events-schema-reified event-or-events)]
                msg)))
          {:events-schema events-schema
           :events-schema-reified events-schema-reified
