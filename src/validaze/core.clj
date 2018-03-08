@@ -1,6 +1,7 @@
 (ns validaze.core
   (:require
    [clojure.spec.alpha :as s]
+   [clojure.spec.test.alpha :as stest]
    [clojure.test.check.generators :as gen]
    [clojure.test.check.properties :as prop]
    [clojure.test.check :as tc]
@@ -217,9 +218,12 @@
               (property-set :includes))
     true))
 
+(s/def ::property-set
+  (s/map-of ::snake-cased-alpha-numeric ::property-attrs))
+
 (s/def ::event-property-set
   #(and (valid-includes? %1)
-        (s/valid? (s/map-of ::snake-cased-alpha-numeric ::property-attrs) (dissoc %1 :includes))))
+        (s/valid? ::property-set (dissoc %1 :includes))))
 
 (s/def ::events-schema
   (s/with-gen
@@ -598,6 +602,9 @@
 (s/def ::super-properties-schema
   (s/map-of ::snake-cased-alpha-numeric ::super-property-field))
 
+(s/def ::property-lists
+  (s/map-of keyword? ::property-lists))
+
 (defn- check-property-list-references [events-schema property-lists]
   (let [keys (set (keys property-lists))
         includes
@@ -637,6 +644,13 @@
   (specter/transform [specter/MAP-VALS specter/MAP-VALS (specter/submap [:includes])]
                      #(apply merge (map property-lists (%1 :includes))) m))
 
+(s/fdef validator
+        :args (s/cat :events-schema ::events-schema
+                     :properties-schema ::properties-schema
+                     :super-properties-schema ::super-properties-schema
+                     :property-lists ::property-lists
+                     :refinements ::refinements)
+        :ret ::validator)
 (defn validator [events-schema properties-schema super-properties-schema property-lists refinements]
   (let [property-lists (into-recursively-sorted-map property-lists)
         events-schema-raw (into-recursively-sorted-map events-schema)
@@ -671,3 +685,5 @@
         ])
 
   )
+
+(stest/instrument)

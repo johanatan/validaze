@@ -14,8 +14,5 @@
   :exact-lein-version "2.8.1"
   :main ^:skip-aot validaze.core
   :target-path "target/%s"
-  ;; print warning if test takes longer than 5 seconds to run
   :eftest {:test-warn-time 5000}
-  :profiles {:uberjar {:aot :all}
-             :dev     {:global-vars  {*warn-on-reflection* false}
-                       :plugins [[lein-eftest "0.4.1"]]}})
+  :profiles {:dev {:plugins [[lein-eftest "0.4.1"]]}})
