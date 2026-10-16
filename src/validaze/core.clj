@@ -8,6 +8,9 @@
    [com.rpl.specter :as specter]
    [com.gfredericks.test.chuck.generators :as gen']
    [clojure.core.match :refer [match]]
+   [clojure.pprint]
+   [clojure.set]
+   [clojure.string]
    [arrangement.core :as order]
    [validaze.refinements :as refinements]))
 
@@ -854,12 +857,13 @@
          super-properties-schemas-flattened (apply merge (reverse (vals super-properties-schema-reified)))
          properties-validators (properties-schemas->validators
                                 user-defined-refinements refinements properties-schema
-                                super-properties-schemas-flattened)]
+                                super-properties-schemas-flattened)
+         base-validators (base-event-validators refinements)]
      (if (schemas-valid? events-schema events-schema-raw properties-schema super-properties-schema
                          super-properties-schema-raw property-lists)
        (with-meta
          (fn [event-or-events]
-           (if-let [msg (validate-base (base-event-validators refinements) event-or-events)]
+           (if-let [msg (validate-base base-validators event-or-events)]
              msg
              (validate-extended refinements keys-validators super-keys-validators
                                 properties-validators events-schema-reified event-or-events)))
