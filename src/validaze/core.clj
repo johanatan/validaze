@@ -429,10 +429,15 @@
 
 (s/fdef enum-validator
         :args (s/cat :refinements ::refinements-with-string :values (s/coll-of string? :min-count 1))
+        ;; ret accepts v (returns nil) iff v is one of the enum values
         :fn #(let [val-set (set (-> %1 :args :values))
                    ret (:ret %1)]
-               (-> (prop/for-all [v (s/gen any?)] (boolean (val-set v)))
-                   (partial tc/quick-check 100)))
+               (->> (prop/for-all [v (gen/one-of [(gen/elements (vec val-set))
+                                                  (s/gen any?)])]
+                      (= (nil? (ret v)) (contains? val-set v)))
+                    (tc/quick-check 100)
+                    :result
+                    true?))
         :ret ::primitive-validator)
 (defn- enum-validator [refinements values]
   (let [value-set (set values)
