@@ -16,4 +16,5 @@
   :main ^:skip-aot validaze.core
   :target-path "target/%s"
   :eftest {:test-warn-time 5000}
-  :profiles {:dev {:plugins [[lein-eftest "0.4.1"]]}})
+  :profiles {:dev {:source-paths ["examples"]
+                   :plugins [[lein-eftest "0.4.1"]]}})
