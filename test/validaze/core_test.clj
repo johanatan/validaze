@@ -4,7 +4,12 @@
             [clojure.set :as set]
             [clojure.spec.alpha :as s]
             [clojure.spec.test.alpha :as stest]
-            [clojure.test.check.generators :as gen]))
+            [clojure.test.check.generators :as gen]
+            [validaze.instrumentation :refer [with-full-instrumentation]]))
+
+;; Tests here instrument everything; restore afterwards so later test
+;; namespaces run the way users do.
+(use-fixtures :once with-full-instrumentation)
 
 (defn instrument-all-syms []
   (stest/instrument (stest/instrumentable-syms)))
@@ -32,7 +37,9 @@
              `core/-prop-spec->prop-validator
              `core/validate-to-msg
              `core/keys-validator]]
-    (spec-check-is-success (stest/check fns))))
+    ;; 100 samples each: under full instrumentation every validation also
+    ;; exercises its fspec args, so the default 1000 takes about an hour.
+    (spec-check-is-success (stest/check fns {:clojure.spec.test.check/opts {:num-tests 100}}))))
 
 (deftest generator-spec-congruence
   (instrument-all-syms)

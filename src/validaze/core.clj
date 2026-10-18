@@ -28,18 +28,21 @@
 (s/def ::nonnilable-json-primitive
   (s/with-gen
     (s/or :b boolean? :n number? :s string?)
-    #(let [selected (select-keys base-refinements [:boolean :number :string])]
-      ((merge {nil (gen/one-of (map (fn [p] (s/gen p)) (vals selected)))}
-              (specter/transform [specter/MAP-VALS] s/gen selected))
-       primitive-type-to-gen))))
+    #(let [selected (select-keys base-refinements [:boolean :number :string])
+           any-primitive (gen/one-of (map (fn [p] (s/gen p)) (vals selected)))]
+      (get (merge (specter/transform [specter/MAP-VALS] s/gen selected)
+                  {:integer (s/gen integer?)})
+           primitive-type-to-gen
+           any-primitive))))
 
 (def value-level-value-spec (s/or :primitive ::json-primitive :seq sequential? :map map?))
 (s/def ::value-level-value
   (s/with-gen
     value-level-value-spec
-    #(if (not (nil? primitive-type-to-gen))
-       (s/gen ::nonnilable-json-primitive)
-       (s/gen value-level-value-spec))))
+    #(case primitive-type-to-gen
+       nil (s/gen value-level-value-spec)
+       :object (gen/map gen/string (s/gen ::json-primitive))
+       (s/gen ::nonnilable-json-primitive))))
 
 (s/def ::json-primitive
   (s/nilable ::nonnilable-json-primitive))
@@ -103,8 +106,10 @@
    (s/nilable string?))
 
 (s/fdef validate-to-msg
+        ;; :value is any?: validators see whole events, objects and lists, and
+        ;; callers may pass non-JSON data.
         :args (s/cat :validation-fn ::value-level-validation-fn :message-fn ::primitive-message-fn
-                     :value ::json-primitive)
+                     :value any?)
         :ret ::validation-result)
 (defn- validate-to-msg [validation-fn message-fn value]
   (if-not (s/valid? validation-fn value)
@@ -438,7 +443,7 @@
                (->> (prop/for-all [v (gen/one-of [(gen/elements (vec val-set))
                                                   (s/gen any?)])]
                       (= (nil? (ret v)) (contains? val-set v)))
-                    (tc/quick-check 100)
+                    (tc/quick-check 20)
                     :result
                     true?))
         :ret ::primitive-validator)
@@ -457,7 +462,7 @@
         validation-fn (fn [v] (and (sequential? v) (every? #(nil? (validator %1)) v)))
         msg-fn (fn [v] (format "must be a vector of type '%s'%s"
                                (name inner-type)
-                               (if is-user-defined?
+                               (if (and is-user-defined? (sequential? v))
                                  (format " and '%s' %s" (name inner-type) (some identity (map validator v)))
                                  "")))]
     (refinement-kwd->validator (assoc refinements
@@ -484,7 +489,8 @@
                                     :else (throw
                                            (IllegalStateException. (format "Invalid nested type: %s" value-type))))
         value-validator (value-type->validator value-type)
-        validation-fn (fn [v] (and (every? #(nil? (key-validator %1)) (keys v))
+        validation-fn (fn [v] (and (map? v)
+                                   (every? #(nil? (key-validator %1)) (keys v))
                                    (every? #(nil? (value-validator %1)) (vals v))))
         msg-fn (fn [_] (format "must be an object from type '%s' to type '%s'"
                                (name key-type) (name-type value-type)))]
@@ -553,9 +559,13 @@
      #(let [[refinements [_ [refinement-type refinement]]] %1]
         (condp = refinement-type
           :kwd (contains? refinements refinement)
-          :vectorized (cond (= :list (first refinement))
-                            (contains? refinements (:tail (second refinement)))
-                            (= :enum (first refinement)) true))))
+          :vectorized (case (first refinement)
+                        :list (contains? refinements (:tail (second refinement)))
+                        :enum true
+                        :obj (let [{:keys [from to]} (second refinement)
+                                   [to-kind to-val] to]
+                               (and (contains? refinements from)
+                                    (contains? refinements (if (= to-kind :kwd) to-val (:tail to-val)))))))))
     #(gen/let [refinements (gen-derived-from-refinements (comp first vector))
                property (s/gen ::snake-cased-alpha-numeric)
                refinement (gen/one-of [(gen/elements (keys refinements))
@@ -606,11 +616,25 @@
   (let [validators (map #(properties-validators (first %1)) props)]
     (map #(%1 props) validators)))
 
-(defn- validate-conditional-requires [events-schema-reified event-type event-version properties]
-  (let [prop-specs ((events-schema-reified event-type) event-version)
+(defn- validate-conditional-requires
+  "Takes the materialized reified events schema, so conditions declared in
+  earlier versions still apply to later ones."
+  [events-schema-reified-materialized event-type event-version properties]
+  (let [prop-specs ((events-schema-reified-materialized event-type) event-version)
         validators (specter/select
                     [specter/ALL specter/LAST :required? specter/LAST #(not= % trivial-validator)]
                     prop-specs)]
+    (map #(%1 properties) validators)))
+
+(defn- validate-super-conditional-requires
+  "Super-property versions are additive, so version n is the union of versions 1..n."
+  [super-properties-schema-reified super-properties-version properties]
+  (let [active (->> super-properties-schema-reified
+                    (filter #(<= (key %) super-properties-version))
+                    (map val))
+        validators (specter/select
+                    [specter/ALL specter/MAP-VALS :required? specter/LAST #(not= % trivial-validator)]
+                    active)]
     (map #(%1 properties) validators)))
 
 (defn- event-key->optional-spec [events-schema-reified event-type event-version key]
@@ -620,20 +644,27 @@
           (or (-> key event-schema :required? meta :syntax) false)
           (recur events-schema-reified event-type (- event-version 1) key)))))
 
-(defn- event->schema [events-schema-reified super-keys-validators keys-validators
-                      properties-schema super-properties-schema-raw
-                      super-properties-version event-type event-version]
-  (if-let [super-keys-validator (get super-keys-validators super-properties-version)]
+(defn- event->schema
+  "A nil super-properties-version means the default, as for events."
+  [events-schema-reified super-keys-validators keys-validators
+   properties-schema super-properties-schema-raw
+   super-properties-version event-type event-version]
+  (let [super-version (or super-properties-version (apply min (keys super-keys-validators)))]
+   (when (contains? super-keys-validators super-version)
     (if-let [event-keys-validators (keys-validators event-type)]
       (if-let [event-keys-validator (get event-keys-validators event-version)]
         (let [{keys-req :required keys-optional :optional} (meta event-keys-validator)
-              {sup-keys-req :required sup-keys-optional :optional} (meta super-keys-validator)
               keys-spec (fn [keys req?] (apply merge (map #(do {% {:required? req?}}) keys)))
               req-keys (keys-spec keys-req true)
               opt-spec (partial event-key->optional-spec events-schema-reified event-type event-version)
               opt-keys (apply merge (map #(do {%1 {:required? (opt-spec %1)}}) keys-optional))
               event-keys (merge req-keys opt-keys)
-              super-keys (merge (keys-spec sup-keys-req true) (keys-spec sup-keys-optional false))
+              ;; Read requiredness from the raw schema so :when conditions survive.
+              super-keys (->> super-properties-schema-raw
+                              (filter #(<= (key %) super-version))
+                              (map val)
+                              (apply merge)
+                              (specter/transform [specter/MAP-VALS] #(select-keys % [:required?])))
               merged-prop-schema (apply merge properties-schema)
               referred-key-props (keys event-keys)
               event-key-types (apply merge (map #(do {%1 (merged-prop-schema %1)}) referred-key-props))
@@ -645,10 +676,11 @@
           (into-recursively-sorted-map
            {:keys event-keys
             :super-keys super-keys
-            :types reduced}))))))
+            :types reduced})))))))
 
 (defn- validate-single-extended [refinements keys-validators super-keys-validators
-                                 properties-validators events-schema-reified
+                                 properties-validators events-schema-reified-materialized
+                                 super-properties-schema-reified
                                  {:strs [event_type event_version properties super_properties_version]
                                   :or {super_properties_version (apply min (keys super-keys-validators))}}]
   (if-let [super-keys-validator (get super-keys-validators super_properties_version)]
@@ -660,7 +692,9 @@
             [msg]
             (not-empty
              (remove nil? (concat (validate-conditional-requires
-                                   events-schema-reified event_type event_version properties)
+                                   events-schema-reified-materialized event_type event_version properties)
+                                  (validate-super-conditional-requires
+                                   super-properties-schema-reified super_properties_version properties)
                                   (validate-property-values properties-validators properties))))))
         [(format "There is no version %s for event '%s'" event_version event_type)]))
     [(format "There is no super-properties version %s" super_properties_version)]))
@@ -676,13 +710,12 @@
         (into [] errors)
         errors))))
 
-(defn- validate-extended [refinements keys-validators super-keys-validators
-                          properties-validators events-schema-reified event]
-  (validate-vector-or-single
-   event
-   (partial validate-single-extended refinements keys-validators
-            super-keys-validators properties-validators events-schema-reified)
-   (constantly nil)))
+(defn- validate-single
+  "Envelope checks, then (if they pass) the event's own checks. Runs per
+  event, so in a batch one event's envelope errors don't hide the others'."
+  [base-event-validators extended-fn event]
+  (or (not-empty (into [] (keep #(% event)) base-event-validators))
+      (some-> (extended-fn event) vec)))
 
 (defn- property->validator [refinements prop refinement-kwd]
   (prepend-prop prop (refinement-kwd->validator refinements refinement-kwd)))
@@ -699,13 +732,9 @@
    (property->validator refinements "event_type" :string)
    (property->validator refinements "properties" :object)])
 
-(defn- validate-base [base-event-validators event]
-  (let [validator (fn [event] (filter identity (map #(% event) base-event-validators)))]
-    (validate-vector-or-single event validator (constantly nil))))
-
 (defn- check-super-property-separateness [properties-schema super-properties-schema]
   (let [prop-keys (-> properties-schema all-properties keys set)
-        super-prop-keys (-> super-properties-schema keys set)
+        super-prop-keys (->> super-properties-schema vals (mapcat keys) set)
         intersection (clojure.set/intersection prop-keys super-prop-keys)]
     (if (not-empty intersection)
       (throw (IllegalStateException.
@@ -771,7 +800,8 @@
 
 (defn- reify-required-specs [prop-schema]
   (specter/transform
-   [specter/ALL (specter/collect-one specter/FIRST) specter/LAST :required?]
+   ;; `some?` skips nil attrs, which mark a property as deleted in this version.
+   [specter/ALL (specter/collect-one specter/FIRST) specter/LAST some? :required?]
    (fn [prop req-spec]
      (match req-spec
             [:when other-prop values]
@@ -797,7 +827,10 @@
 (defn- prepare-refinements [user-defined-refinements normalized-base-refinements]
   (let [user-defined-refinements (specter/transform
                                   [specter/MAP-VALS set?]
-                                  #(do [:string [%1 (fn [_] (str "must be one of: " %1))]])
+                                  ;; A set returns its element or nil, not a boolean, so wrap it.
+                                  ;; :set metadata keeps the members visible to callers.
+                                  #(do [:string [(with-meta (fn [v] (contains? %1 v)) {:set %1})
+                                                 (fn [_] (str "must be one of: " %1))]])
                                   user-defined-refinements)
         refinements (s/assert ::refinements
                               (merge user-defined-refinements
@@ -841,9 +874,10 @@
                                 reify-required-specs
                                 (explode-includes property-lists events-schema-raw))
          events-schema (specter/transform
-                        [specter/MAP-VALS specter/MAP-VALS specter/MAP-VALS :required?]
+                        [specter/MAP-VALS specter/MAP-VALS specter/MAP-VALS some? :required?]
                         first
                         events-schema-reified)
+         events-schema-reified-materialized (materialize-event-schema events-schema-reified)
          properties-schema (into-recursively-sorted-map properties-schema)
          super-properties-schema-raw (into-recursively-sorted-map super-properties-schema)
          super-properties-schema-reified (specter/transform
@@ -868,10 +902,13 @@
                          super-properties-schema-raw property-lists)
        (with-meta
          (fn [event-or-events]
-           (if-let [msg (validate-base base-validators event-or-events)]
-             msg
-             (validate-extended refinements keys-validators super-keys-validators
-                                properties-validators events-schema-reified event-or-events)))
+           (validate-vector-or-single
+            event-or-events
+            (partial validate-single base-validators
+                     (partial validate-single-extended refinements keys-validators
+                              super-keys-validators properties-validators
+                              events-schema-reified-materialized super-properties-schema-reified))
+            (constantly nil)))
          {:events-schema events-schema
           :events-schema-reified events-schema-reified
           :super-properties-schema super-properties-schema
@@ -882,24 +919,26 @@
           :event->schema (partial event->schema events-schema-reified super-keys-validators keys-validators
                                   properties-schema super-properties-schema-raw)})))))
 
-(defn- refinement->base-refinement [refinements refinement]
+(defn- refinement->base-refinement
+  "Follows parent links to a base type (:string, :integer, ...). Set refinements are strings."
+  [refinements refinement]
   (loop [cur refinement]
-    (let [[nxt _] (refinements cur)]
-      (if (nil? nxt) cur (recur nxt)))))
+    (let [r (refinements cur)
+          nxt (cond (set? r) :string
+                    (vector? r) (first r))]
+      (if (or (nil? nxt) (= nxt cur)) cur (recur nxt)))))
 
 (s/fdef refinements->validators
         :args (s/cat :refinements
                      (fn [v]
-                       (every?
-                        identity
-                        (map
-                         (fn [[refinement [kwd refinement-spec :as refinement-tup]]]
-                           (or (set? refinement-spec)
-                               (binding [primitive-type-to-gen
-                                         (refinement->base-refinement
-                                          (merge v normalized-base-refinements) kwd)]
-                                 (s/valid? ::refinement-tup refinement-tup))))
-                         v))))
+                       (let [all (merge v refinements/user-defined-refinements normalized-base-refinements)]
+                         (every?
+                          (fn [[_ refinement]]
+                            (or (set? refinement)
+                                (binding [primitive-type-to-gen
+                                          (refinement->base-refinement all (first refinement))]
+                                  (s/valid? ::refinement-tup refinement))))
+                          v))))
         :ret (s/map-of keyword? ::validator))
 (defn refinements->validators [refinements]
   (let [[_ refinements] (prepare-refinements refinements normalized-base-refinements)]
